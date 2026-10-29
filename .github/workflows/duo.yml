@@ -17,7 +17,7 @@ jobs:
       - name: Check Apple pickup availability
         run: |
           python3 - <<'PY'
-          import json, os, urllib.parse, urllib.request
+          import json, os, time, urllib.error, urllib.parse, urllib.request
 
           # Star White only; 2TB deliberately excluded.
           # 1TB number is inferred from Apple's numbering pattern. Verify it.
@@ -28,19 +28,34 @@ jobs:
           }
           match = os.environ["STORE_MATCH"].lower()
           topic = os.environ["NTFY_TOPIC"]
-          params = [("pl", "true"), ("mts.0", "regular"), ("location", os.environ["ZIP_CODE"])]
-          params += [(f"parts.{i}", p) for i, p in enumerate(PARTS)]
-          url = "https://www.apple.com/shop/fulfillment-messages?" + urllib.parse.urlencode(params)
-          req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (personal stock checker)"})
-          with urllib.request.urlopen(req, timeout=20) as r:
-              data = json.load(r)
+          HEADERS = {
+              "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+              "Accept": "application/json, text/plain, */*",
+              "Accept-Language": "en-US,en;q=0.9",
+              "Referer": "https://www.apple.com/shop/buy-iphone/iphone-duo",
+          }
 
-          found = False
-          for s in data["body"]["content"]["pickupMessage"]["stores"]:
-              if match not in s.get("storeName", "").lower():
+          for part, label in PARTS.items():
+              params = {"pl": "true", "mts.0": "regular", "parts.0": part,
+                        "location": os.environ["ZIP_CODE"]}
+              url = "https://www.apple.com/shop/fulfillment-messages?" + urllib.parse.urlencode(params)
+              try:
+                  with urllib.request.urlopen(urllib.request.Request(url, headers=HEADERS), timeout=20) as r:
+                      data = json.load(r)
+              except urllib.error.HTTPError as e:
+                  body = e.read().decode("utf-8", "replace")[:300]
+                  print(f"{label} ({part}): HTTP {e.code} from Apple. Body: {body}")
+                  time.sleep(2)
                   continue
-              found = True
-              for part, label in PARTS.items():
+              except Exception as e:
+                  print(f"{label} ({part}): request failed: {e}")
+                  continue
+
+              found = False
+              for s in data["body"]["content"]["pickupMessage"]["stores"]:
+                  if match not in s.get("storeName", "").lower():
+                      continue
+                  found = True
                   info = s["partsAvailability"].get(part, {})
                   status = info.get("pickupDisplay", "not returned")
                   title = info.get("messageTypes", {}).get("regular", {}).get("storePickupProductTitle", "")
@@ -52,6 +67,7 @@ jobs:
                           data=msg.encode(),
                           headers={"Title": "iPhone Duo in stock", "Priority": "urgent", "Tags": "iphone,tada"},
                       ), timeout=15)
-          if not found:
-              print("Penn Square not in results; check ZIP_CODE / STORE_MATCH")
+              if not found:
+                  print(f"{label}: Penn Square not in results; check ZIP_CODE / STORE_MATCH")
+              time.sleep(2)
           PY
