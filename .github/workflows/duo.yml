@@ -1,0 +1,57 @@
+name: iPhone Duo watcher
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      ZIP_CODE: "73112"
+      STORE_MATCH: "penn square"
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+    steps:
+      - name: Check Apple pickup availability
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.parse, urllib.request
+
+          # Star White only; 2TB deliberately excluded.
+          # 1TB number is inferred from Apple's numbering pattern. Verify it.
+          PARTS = {
+              "MK1E4LL/A": "256GB Star White",
+              "MK1G4LL/A": "512GB Star White",
+              "MK1J4LL/A": "1TB Star White",
+          }
+          match = os.environ["STORE_MATCH"].lower()
+          topic = os.environ["NTFY_TOPIC"]
+          params = [("pl", "true"), ("mts.0", "regular"), ("location", os.environ["ZIP_CODE"])]
+          params += [(f"parts.{i}", p) for i, p in enumerate(PARTS)]
+          url = "https://www.apple.com/shop/fulfillment-messages?" + urllib.parse.urlencode(params)
+          req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (personal stock checker)"})
+          with urllib.request.urlopen(req, timeout=20) as r:
+              data = json.load(r)
+
+          found = False
+          for s in data["body"]["content"]["pickupMessage"]["stores"]:
+              if match not in s.get("storeName", "").lower():
+                  continue
+              found = True
+              for part, label in PARTS.items():
+                  info = s["partsAvailability"].get(part, {})
+                  status = info.get("pickupDisplay", "not returned")
+                  title = info.get("messageTypes", {}).get("regular", {}).get("storePickupProductTitle", "")
+                  print(f"{s['storeName']} | {label} ({part}) | {status} | {title}")
+                  if status == "available":
+                      msg = f"{label} available for pickup at {s['storeName']}!\nhttps://www.apple.com/shop/buy-iphone/iphone-duo"
+                      urllib.request.urlopen(urllib.request.Request(
+                          f"https://ntfy.sh/{topic}",
+                          data=msg.encode(),
+                          headers={"Title": "iPhone Duo in stock", "Priority": "urgent", "Tags": "iphone,tada"},
+                      ), timeout=15)
+          if not found:
+              print("Penn Square not in results; check ZIP_CODE / STORE_MATCH")
+          PY
